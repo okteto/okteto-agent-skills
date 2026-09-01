@@ -17,6 +17,11 @@ jobs:
   evals:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    # The `secrets` context is not available in `if:` conditions — referencing it
+    # there fails the whole workflow at startup. Surface the key as an env var and
+    # branch on that instead.
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
     steps:
       - uses: actions/checkout@v4
 
@@ -30,11 +35,9 @@ jobs:
         run: tests/run-evals.sh --layer wiring
 
       - name: Live agent evals
-        if: ${{ secrets.ANTHROPIC_API_KEY != '' }}
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        if: ${{ env.ANTHROPIC_API_KEY != '' }}
         run: tests/run-evals.sh --layer agent
 
       - name: Live agent evals (skipped)
-        if: ${{ secrets.ANTHROPIC_API_KEY == '' }}
+        if: ${{ env.ANTHROPIC_API_KEY == '' }}
         run: echo "::notice::ANTHROPIC_API_KEY secret not set — live agent evals skipped. Hooks and wiring layers still ran."

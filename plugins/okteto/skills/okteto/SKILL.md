@@ -93,8 +93,34 @@ You are facilitating their workflow, not trying to observe their terminal sessio
 | User asks to run tests | `okteto exec -- make test` or language-appropriate command |
 | User pastes an error | Read relevant code, analyze, suggest fix |
 | User asks "why is this failing?" | Run diagnostics via `okteto exec` |
-| User makes code changes | Changes auto-sync; help them run next steps |
+| User makes source code changes | Changes auto-sync; help them run next steps |
+| User changes a build input (Dockerfile, dependencies, `okteto.yaml`) | Nothing syncs -- rebuild and verify (see [When a change needs a rebuild](#when-a-change-needs-a-rebuild-not-a-sync)) |
 | User asks to run e2e tests | `okteto test <test-name>` from okteto.yaml |
+
+### When a change needs a rebuild, not a sync
+
+File sync only covers what the running container reads at runtime. It does **not** cover anything baked into the image at build time. After changing any of these, the environment is stale until you rebuild:
+
+- `Dockerfile` or `.dockerignore`
+- dependency manifests (`go.mod`/`go.sum`, `package.json`, `requirements.txt`, `pom.xml`, ...)
+- compiled binaries, or anything produced by a build step
+- `okteto.yaml` itself
+
+Rebuild and confirm it works:
+
+```bash
+okteto build <service>      # rebuild the image through the Okteto Build Service
+okteto deploy --wait        # redeploy with the new image
+```
+
+If `okteto.yaml` changed, run `okteto validate` **before** deploying -- a bad manifest fails mid-deploy and leaves the environment half-updated:
+
+```bash
+okteto validate
+okteto deploy --wait
+```
+
+**Do this without being asked.** A Dockerfile that builds on your machine can still fail in the Build Service -- a file excluded by `.dockerignore`, a missing `go.sum`, a tool version the base image cannot satisfy -- and the only way to find out is to build it. Report the outcome: endpoints on success, the error and your fix on failure. Iterate until it deploys.
 
 **REQUIRED SUB-SKILL:** For a broken or unhealthy environment -- CrashLoopBackOff, OOMKilled, ImagePullBackOff, pods stuck in Pending, deploy failures, or file sync not working -- use the okteto-debugging skill. It has the full triage algorithm and a playbook per failure mode.
 
@@ -117,12 +143,13 @@ When operating without a developer in the loop, you own the full lifecycle: envi
 3. **Make code changes**: Edit the relevant source files based on the task requirements. Use the Read tool, Grep, and Glob to explore the codebase. Inspect the service directories and `okteto.yaml` to understand service structure.
 
 4. **Rebuild and redeploy changed services**:
+   - If `okteto.yaml` was modified, run `okteto validate` **before** deploying -- a bad manifest fails mid-deploy and leaves the environment half-updated
    - Run `okteto build <service>` to rebuild only the changed service image
    - Run `okteto deploy --wait` to redeploy with the updated image
    - Alternatively, if only one service changed, target it: `okteto build <service> && okteto deploy --wait`
+   - Do this after **any** change to a build input -- Dockerfile, `.dockerignore`, dependency manifest, `okteto.yaml` -- not just source code. Nothing syncs in autonomous mode; the environment is stale until you redeploy.
 
 5. **Validate**:
-   - If `okteto.yaml` was modified, run `okteto validate` first to catch manifest errors before deploying
    - Run `okteto test <test-name>` for each test container in okteto.yaml
    - Run `okteto endpoints` and use curl or similar to smoke-test the live endpoints
    - Check `okteto logs <service> --since 5m` for errors in the changed services
