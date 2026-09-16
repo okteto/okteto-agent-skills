@@ -127,6 +127,10 @@ write_edit_targets() { # file paths the model tried to Write/Edit
          | select(.type=="tool_use" and (.name=="Write" or .name=="Edit"))
          | .input.file_path // empty' "$1" 2>/dev/null
 }
+skill_invocations() { # skills the model loaded via the Skill tool
+  jq -r 'select(.type=="assistant") | .message.content[]?
+         | select(.type=="tool_use" and .name=="Skill") | .input.skill // .input.command // empty' "$1" 2>/dev/null
+}
 tool_sequence() { # ordered "BASH<TAB><cmd>" / "EDIT<TAB><path>" per tool_use, for ordering assertions
   jq -r 'select(.type=="assistant") | .message.content[]? | select(.type=="tool_use")
          | if .name=="Bash" then "BASH\t" + (.input.command // "")
@@ -504,32 +508,103 @@ scenario_autonomous_no_destroy() {
 # ---------------------------------------------------------------------------
 # Manifest-optimizer validation
 #
-# After the model rewrites an intentionally un-optimized fixture manifest, its
-# output (okteto.yaml + ignore files) is validated two ways:
+# After the model rewrites an intentionally un-optimized fixture manifest, the
+# output (okteto.yaml + ignore files) is checked four ways, cheapest first:
 #
-#   1. grade_manifest  — a deterministic grep rubric: a fast, dependency-free
-#                        cross-check for the objective criteria (no :latest,
-#                        ${OKTETO_BUILD_*_IMAGE} wiring, scoped ignore files,
-#                        persisted deps, resources, forward, test.caches).
-#   2. judge_manifest  — an LLM judge: a separate one-turn model call reads the
-#                        produced files and rules on whether each best practice
-#                        is *actually* met (semantic judgment the greps can't
-#                        do — e.g. correct forward/reverse direction, genuinely
-#                        scoped sync). This is the authoritative validation and
-#                        needs a working API key, so it runs in the agent layer.
+#   0. skill activation  — the transcript must show a Skill call for
+#                          okteto-manifest-optimizer. The prompt is a realistic
+#                          user complaint, not a checklist, so a green run means
+#                          the skill fired and did the work.
+#   1. validate_manifest — the REAL okteto CLI's `okteto validate -f` (offline:
+#                          no context, no cluster) as a hard schema gate. Skipped
+#                          with a note when no real CLI is installed.
+#   2. grade_manifest    — a deterministic rubric over the manifest (comments
+#                          stripped) and the ignore files: no :latest,
+#                          ${OKTETO_BUILD_*_IMAGE} wiring, scoped ignore files in
+#                          the order their tool applies them, deps under
+#                          volumes, resources, forward, test.caches.
+#   3. judge_manifest    — an LLM judge: a separate one-turn, tool-less model
+#                          call rules per criterion on the MEANING of the files
+#                          (correct forward/reverse direction, genuinely scoped
+#                          sync). Needs auth, so it runs in the agent layer.
 #
-# Both live in the agent layer (generating the manifest already needs auth).
 # Per-criterion results are notes; each grader emits one pass/fail on the
-# percentage threshold, so a single missed criterion doesn't flake a run. The
-# mock cluster can't prove a manifest deploys, so there is no live
-# `okteto build`/`up`/`test` execution gate — the judge is the ground truth.
+# percentage threshold, so a single missed criterion doesn't flake a run.
 # ---------------------------------------------------------------------------
 
 MANIFEST_RUBRIC_THRESHOLD=75   # percent of applicable criteria that must pass
+JUDGE_MODEL="${CLAUDE_JUDGE_MODEL:-$EVAL_MODEL}"   # let the grader differ from the generator
+# Directories that never belong in a sync or build context, matched as whole
+# path segments so a lone `.gitignore` line does not count as excluding `.git`.
+ARTIFACT_DIRS='(^|/)(node_modules|dist|build|target|__pycache__|\.git|vendor|\.venv)(/|$)'
 
 manifest_file() { # echo the produced manifest path in <dir>, empty if none
   if   [ -f "$1/okteto.yaml" ]; then echo "$1/okteto.yaml"
   elif [ -f "$1/okteto.yml" ];  then echo "$1/okteto.yml"; fi
+}
+strip_comments() { grep -v '^[[:space:]]*#' "$1"; }
+yaml_block() { # yaml_block <key>: the `key:` line plus its immediate list items, from stdin
+  awk -v k="$1" '$0 ~ "^[[:space:]]*" k ":" {b=1; print; next} b && /^[[:space:]]*-/ {print; next} {b=0}'
+}
+
+# crit <name> <label> <0|1>: tally one criterion into CRIT_OK/CRIT_TOTAL
+crit() {
+  CRIT_TOTAL=$((CRIT_TOTAL + 1))
+  if [ "$3" = 1 ]; then CRIT_OK=$((CRIT_OK + 1)); note "$1  [x] $2"; else note "$1  [ ] $2"; fi
+}
+# report_score <name> <label>: one pass/fail on the CRIT_* tally vs the threshold
+report_score() {
+  local score=$(( CRIT_OK * 100 / CRIT_TOTAL ))
+  if [ "$score" -ge "$MANIFEST_RUBRIC_THRESHOLD" ]; then
+    pass "$1: $2 ${CRIT_OK}/${CRIT_TOTAL} (${score}%) >= ${MANIFEST_RUBRIC_THRESHOLD}%"
+  else
+    fail "$1: $2 ${CRIT_OK}/${CRIT_TOTAL} (${score}%) < ${MANIFEST_RUBRIC_THRESHOLD}%"
+  fi
+}
+
+# ignore_file_scoped <file> <dep-egrep> <includes-first|catchall-first>
+# 0 if the ignore file genuinely scopes its context: an explicit dependency or
+# artifact directory entry, or the "exclude everything, then `!`-include build
+# inputs" pattern -- but only in the order the tool applies it:
+#   .stignore     (Syncthing) FIRST matching pattern wins -> `!` lines before `*`
+#   .dockerignore (Docker)    LAST matching pattern wins  -> `*` before `!` lines
+# In the wrong order the catch-all swallows the includes: nothing syncs, or the
+# build context is empty. A mis-ordered file therefore fails outright.
+ignore_file_scoped() {
+  local f="$1" deps="$2" order="$3"
+  [ -f "$f" ] || return 1
+  local body star bang
+  body=$(strip_comments "$f")
+  star=$(printf '%s\n' "$body" | grep -nE '^\*[[:space:]]*$' | head -1 | cut -d: -f1)
+  bang=$(printf '%s\n' "$body" | grep -n '^!' | head -1 | cut -d: -f1)
+  if [ -n "$star" ]; then
+    [ -n "$bang" ] || return 1                       # `*` alone: an empty context
+    case "$order" in
+      includes-first) [ "$bang" -lt "$star" ] || return 1 ;;
+      catchall-first) [ "$star" -lt "$bang" ] || return 1 ;;
+    esac
+    return 0
+  fi
+  printf '%s\n' "$body" | grep -v '^!' | grep -Eq "$deps|$ARTIFACT_DIRS"
+}
+
+# validate_manifest <name> <manifest>: hard schema gate with the REAL okteto
+# CLI. `okteto validate -f` works offline (no context, no cluster). The
+# harness's own PATH never includes the shim (run_claude prepends it only for
+# the model's session), so `command -v okteto` here is the real binary or none.
+validate_manifest() {
+  local name="$1" yml="$2" bin out
+  bin=$(command -v okteto 2>/dev/null || true)
+  if [ -z "$bin" ] || [ "$bin" = "$SHIM_DIR/okteto" ]; then
+    note "$name: real okteto CLI not installed -- schema validation skipped"
+    return
+  fi
+  if out=$(cd "$(dirname "$yml")" && OKTETO_DISABLE_SPINNER=1 "$bin" validate -f "$(basename "$yml")" 2>&1); then
+    pass "$name: 'okteto validate' accepts the generated manifest"
+  else
+    fail "$name: 'okteto validate' rejects the generated manifest"
+    printf '%s\n' "$out" | grep -v '^[[:space:]]*$' | tail -8 | sed 's/^/        /'
+  fi
 }
 
 # grade_manifest <name> <workdir> <dep-dir-egrep> <has_tests 0|1> <serves_port 0|1>
@@ -537,59 +612,45 @@ grade_manifest() {
   local name="$1" work="$2" deps="$3" has_tests="$4" serves="$5"
   local yml; yml=$(manifest_file "$work")
   if [ -z "$yml" ]; then fail "$name: no okteto.yaml/okteto.yml produced"; return; fi
-  local sti="$work/.stignore" dki="$work/.dockerignore"
-  local total=0 ok=0
+  local code hit; code=$(strip_comments "$yml")
+  CRIT_TOTAL=0 CRIT_OK=0
 
-  crit() { # crit <label> <0|1>
-    total=$((total + 1))
-    if [ "$2" = 1 ]; then ok=$((ok + 1)); note "$name  [x] $1"
-    else note "$name  [ ] $1"; fi
-  }
+  printf '%s\n' "$code" | grep -Eq ':latest([^[:alnum:]]|$)' && hit=0 || hit=1
+  crit "$name" "no :latest images" "$hit"
 
-  if grep -Eq ':latest([^[:alnum:]]|$)' "$yml"; then crit "no :latest images" 0
-  else crit "no :latest images" 1; fi
+  printf '%s\n' "$code" | grep -Eq '^[[:space:]]*image:.*OKTETO_BUILD_[A-Z0-9_]+_IMAGE' && hit=1 || hit=0
+  crit "$name" "dev image wired via \${OKTETO_BUILD_<NAME>_IMAGE}" "$hit"
 
-  if grep -q 'OKTETO_BUILD_' "$yml"; then crit "dev image wired via \${OKTETO_BUILD_<NAME>_IMAGE}" 1
-  else crit "dev image wired via \${OKTETO_BUILD_<NAME>_IMAGE}" 0; fi
+  ignore_file_scoped "$work/.stignore" "$deps" includes-first && hit=1 || hit=0
+  crit "$name" ".stignore scopes sync (deps/artifacts excluded; ! includes before *)" "$hit"
 
-  if [ -f "$sti" ] && { grep -Eq '^\*[[:space:]]*$' "$sti" || grep -Eq "$deps" "$sti" \
-       || grep -Eqi 'node_modules|dist|build|target|__pycache__|\.git|vendor' "$sti"; }; then
-    crit ".stignore scopes sync (excludes deps/artifacts)" 1
-  else crit ".stignore scopes sync (excludes deps/artifacts)" 0; fi
+  printf '%s\n' "$code" | yaml_block volumes | grep -Eq "$deps" && hit=1 || hit=0
+  crit "$name" "dependency dirs in dev.volumes" "$hit"
 
-  if grep -q 'volumes:' "$yml" && grep -Eq "$deps" "$yml"; then crit "dependency dirs in dev.volumes" 1
-  else crit "dependency dirs in dev.volumes" 0; fi
+  printf '%s\n' "$code" | grep -q 'requests:' && printf '%s\n' "$code" | grep -q 'limits:' && hit=1 || hit=0
+  crit "$name" "resources.requests and limits set" "$hit"
 
-  if grep -q 'requests:' "$yml" && grep -q 'limits:' "$yml"; then crit "resources.requests and limits set" 1
-  else crit "resources.requests and limits set" 0; fi
-
-  if [ -f "$dki" ] && { grep -Eq '^\*[[:space:]]*$' "$dki" || grep -q '^!' "$dki" \
-       || grep -Eqi 'node_modules|dist|build|target|__pycache__|\.git|vendor' "$dki"; }; then
-    crit ".dockerignore scopes build context" 1
-  else crit ".dockerignore scopes build context" 0; fi
+  ignore_file_scoped "$work/.dockerignore" "$deps" catchall-first && hit=1 || hit=0
+  crit "$name" ".dockerignore scopes build context (* before ! includes)" "$hit"
 
   if [ "$serves" = 1 ]; then
-    if grep -q 'forward:' "$yml" && grep -Eq '[0-9]+:[0-9]+' "$yml"; then crit "forward port mapping (local:remote)" 1
-    else crit "forward port mapping (local:remote)" 0; fi
+    printf '%s\n' "$code" | yaml_block forward | grep -Eq '[0-9]+:([A-Za-z0-9._-]+:)?[0-9]+' && hit=1 || hit=0
+    crit "$name" "forward port mapping (local:remote)" "$hit"
   fi
 
   if [ "$has_tests" = 1 ]; then
-    if grep -q 'test:' "$yml" && grep -q 'caches:' "$yml"; then crit "test.caches set" 1
-    else crit "test.caches set" 0; fi
+    printf '%s\n' "$code" | awk '/^test:/{t=1; next} /^[^[:space:]]/{t=0} t && /^[[:space:]]*caches:/{f=1} END{exit !f}' && hit=1 || hit=0
+    crit "$name" "test.<name>.caches set" "$hit"
   fi
 
-  local score=$(( ok * 100 / total ))
-  if [ "$score" -ge "$MANIFEST_RUBRIC_THRESHOLD" ]; then
-    pass "$name: manifest rubric ${ok}/${total} (${score}%) >= ${MANIFEST_RUBRIC_THRESHOLD}%"
-  else
-    fail "$name: manifest rubric ${ok}/${total} (${score}%) < ${MANIFEST_RUBRIC_THRESHOLD}%"
-  fi
+  report_score "$name" "manifest rubric"
 }
 
 # run_judge <workdir> <prompt> <out-prefix>
-# One-turn headless judge call: no plugin, no tools (max-turns 1 on a text-only
-# prompt), JSON output. Uses the ambient auth of the agent layer (real key or a
-# logged-in CLI) -- deliberately does NOT set the wiring mock's ANTHROPIC_BASE_URL.
+# One-turn headless judge: no plugin and NO tools (`--tools ""`, so the single
+# turn cannot be spent on a Read instead of the verdict), JSON output. Uses the
+# ambient auth of the agent layer -- deliberately does NOT set the wiring
+# mock's ANTHROPIC_BASE_URL.
 run_judge() {
   local workdir="$1" prompt="$2" prefix="$3"
   (
@@ -599,7 +660,7 @@ run_judge() {
       DISABLE_TELEMETRY=1 DISABLE_ERROR_REPORTING=1 DISABLE_AUTOUPDATER=1 \
       claude -p "$prompt" \
         --setting-sources project --strict-mcp-config \
-        --max-turns 1 --model "$EVAL_MODEL" \
+        --tools "" --max-turns 1 --model "$JUDGE_MODEL" \
         --output-format json \
         < /dev/null > "$prefix.json" 2> "$prefix.stderr.log"
   )
@@ -632,11 +693,11 @@ You are a strict reviewer grading an Okteto manifest that was optimized for perf
 Judge the MEANING of the files below, not just keywords. Mark each criterion true (met) or false (not met):
 - no_latest: no image uses :latest; every image is a pinned version tag or @sha256 digest.
 - image_wired: the dev container image references an Okteto build via \${OKTETO_BUILD_<NAME>_IMAGE} instead of a hardcoded tag.
-- stignore_scoped: a .stignore exists and excludes build artifacts, dependency directories, and .git so only active source syncs.
+- stignore_scoped: a .stignore exists and excludes build artifacts, dependency directories, and .git so only active source syncs. Syncthing applies the FIRST matching pattern, so if the file uses a catch-all "*" the "!" include lines must come BEFORE it; "*" first would sync nothing and is NOT met.
 - deps_persisted: this stack's dependency/build-cache directories are persisted in dev.<svc>.volumes.
 - resources_set: the dev container sets BOTH resources.requests and resources.limits.
 - ports_correct: forward uses localPort:remotePort and reverse (if present) uses remotePort:localPort, directions correct for this service.
-- dockerignore_scoped: a .dockerignore scopes the build context (excludes everything, then includes only build inputs).
+- dockerignore_scoped: a .dockerignore scopes the build context: "*" FIRST, then "!" includes for the build inputs only (Docker applies the LAST matching pattern), or explicit exclusions of artifacts and dependency directories.
 - test_caches: a test container defines caches for dependency/build directories (null if the repo has no tests).
 
 Files:
@@ -661,36 +722,52 @@ EOF
     return
   fi
 
-  local total=0 ok=0 k v
+  # One jq call. `tostring` keeps false as "false" -- jq's `//` operator treats
+  # false like null and would silently drop every failed criterion from the tally.
+  local verdicts k v
+  verdicts=$(printf '%s' "$json" | jq -r 'to_entries[] | "\(.key)\t\(.value|tostring)"')
+  CRIT_TOTAL=0 CRIT_OK=0
   for k in no_latest image_wired stignore_scoped deps_persisted resources_set ports_correct dockerignore_scoped test_caches; do
-    v=$(printf '%s' "$json" | jq -r ".$k // \"null\"")
-    if [ "$v" = "null" ]; then note "$name/judge  [-] $k (n/a)"; continue; fi
-    total=$((total + 1))
-    if [ "$v" = "true" ]; then ok=$((ok + 1)); note "$name/judge  [x] $k"
-    else note "$name/judge  [ ] $k"; fi
+    v=$(printf '%s\n' "$verdicts" | awk -F'\t' -v k="$k" '$1==k {print $2; exit}')
+    case "$v" in
+      true)  crit "$name/judge" "$k" 1 ;;
+      false) crit "$name/judge" "$k" 0 ;;
+      *)     note "$name/judge  [-] $k (n/a)" ;;
+    esac
   done
-  if [ "$total" -eq 0 ]; then fail "$name/judge: verdict had no scorable criteria"; return; fi
-  local score=$(( ok * 100 / total ))
-  if [ "$score" -ge "$MANIFEST_RUBRIC_THRESHOLD" ]; then
-    pass "$name: LLM-judge validation ${ok}/${total} (${score}%) >= ${MANIFEST_RUBRIC_THRESHOLD}%"
-  else
-    fail "$name: LLM-judge validation ${ok}/${total} (${score}%) < ${MANIFEST_RUBRIC_THRESHOLD}%"
-  fi
+  if [ "$CRIT_TOTAL" -eq 0 ]; then fail "$name/judge: verdict had no scorable criteria"; return; fi
+  report_score "$name" "LLM-judge validation"
 }
 
-# run_optimize_scenario <key> <fixture> <svc> <dep-dir-egrep> <has_tests> <serves_port> <stack-desc>
+# run_optimize_scenario <key> <fixture> <dep-dir-egrep> <has_tests> <serves_port> <stack-desc>
+# The prompt is what a developer actually says -- a complaint, not the rubric --
+# so the model has to recognise the task and load okteto-manifest-optimizer to
+# learn what "fast" means. Enumerating the criteria here would let the evals
+# pass with the skill uninstalled.
 run_optimize_scenario() {
-  local key="$1" fixture="$2" svc="$3" deps="$4" has_tests="$5" serves="$6" stack="$7"
+  local key="$1" fixture="$2" deps="$3" has_tests="$4" serves="$5" stack="$6"
   section "agent/$key: optimize an un-optimized okteto.yaml ($fixture)"
   local work; work=$(setup_fixture "$key" "$fixture")
   local dir="$RUN_DIR/$key" log="$RUN_DIR/$key/shim.log"; : > "$log"
   run_claude "$work" "$dir/transcript" "$log" 25 "$AGENT_TOOLS" \
-    "This repo has an okteto.yaml but it is slow and un-optimized. Optimize it for Okteto following Okteto's manifest performance best practices: replace any :latest images with pinned versions, add a build section and wire the '$svc' dev container image to it, scope the build and file-sync context with .dockerignore and .stignore, persist dependency and build-cache directories with dev volumes, set resource requests and limits, configure forward/reverse ports correctly, and add a test container with caches. Update okteto.yaml in place and create the ignore files in the repo root. The okteto CLI is installed and already logged in; do not run okteto up."
+    "Our Okteto dev environment for this repo is painfully slow: okteto up takes ages to start and the initial file sync drags on for minutes. Please fix the okteto.yaml so the environment starts fast, adding whatever supporting files that needs. The okteto CLI is installed and already logged in to our cluster."
   local t="$dir/transcript.jsonl"
   run_succeeded "$t" || { fail "$key: session errored (see $dir/)"; return; }
 
+  if skill_invocations "$t" | grep -q 'okteto-manifest-optimizer'; then
+    pass "$key: okteto-manifest-optimizer skill activated"
+  else
+    fail "$key: okteto-manifest-optimizer skill never loaded (no Skill tool call)"
+  fi
   if grep -qE '^okteto +up' "$log"; then fail "$key: 'okteto up' EXECUTED"
   else pass "$key: 'okteto up' never executed"; fi
+  # PROD-493: a changed okteto.yaml is a build input. The skill must validate it
+  # itself, not recommend that the user does.
+  if grep -qE '^okteto +validate' "$log"; then pass "$key: ran 'okteto validate' on the manifest it changed"
+  else fail "$key: never ran 'okteto validate' after editing okteto.yaml (PROD-493)"; fi
+
+  local yml; yml=$(manifest_file "$work")
+  [ -n "$yml" ] && validate_manifest "$key" "$yml"
   grade_manifest "$key" "$work" "$deps" "$has_tests" "$serves"
   judge_manifest "$key" "$work" "$stack" "$deps" "$has_tests" "$serves"
 }
@@ -765,11 +842,11 @@ layer_agent() {
       worktree-namespace)   scenario_worktree_namespace ;;
       autonomous-no-destroy) scenario_autonomous_no_destroy ;;
       # okteto-manifest-optimizer: one repo archetype each. args:
-      #   <key> <fixture> <svc> <dep-dir-egrep> <has_tests> <serves_port> <stack-desc>
-      optimize-node)   run_optimize_scenario optimize-node   opt-node-react "web"     'node_modules|\.npm|\.yarn'  1 1 "Node.js / React (Vite); package.json with dev and test scripts" ;;
-      optimize-go)     run_optimize_scenario optimize-go     opt-go-api     "api"     '/go/pkg|go-build|/go/'      1 1 "Go HTTP API; go.mod + main.go, go test" ;;
-      optimize-java)   run_optimize_scenario optimize-java   opt-java-maven "catalog" '\.m2|\.gradle'             0 0 "Java / Maven; pom.xml, jar build" ;;
-      optimize-python) run_optimize_scenario optimize-python opt-python     "api"     'pip|\.venv|site-packages'  1 1 "Python / Flask; requirements.txt, pytest" ;;
+      #   <key> <fixture> <dep-dir-egrep> <has_tests> <serves_port> <stack-desc>
+      optimize-node)   run_optimize_scenario optimize-node   opt-node-react 'node_modules|\.npm|\.yarn'            1 1 "Node.js / React (Vite); package.json with dev and test scripts" ;;
+      optimize-go)     run_optimize_scenario optimize-go     opt-go-api     '/go/pkg/mod|go-build'              1 1 "Go HTTP API; go.mod + main.go, go test" ;;
+      optimize-java)   run_optimize_scenario optimize-java   opt-java-maven '\.m2|\.gradle'                    0 0 "Java / Maven; pom.xml, jar build" ;;
+      optimize-python) run_optimize_scenario optimize-python opt-python     '\.cache/pip|\.venv|site-packages' 1 1 "Python / Flask; requirements.txt, pytest" ;;
       validate-after-change) scenario_validate_after_change ;;
       *) echo "unknown scenario: $s" >&2; exit 2 ;;
     esac
