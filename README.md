@@ -76,7 +76,7 @@ Both files carry the same tool-neutral Okteto guidance: discovering services fro
 - **`okteto-onboarding` skill** -- Bootstraps projects that have no `okteto.yaml` yet: discovers services, drafts a manifest, validates it, then hands off to the `okteto` skill
 - **`okteto-debugging` skill** -- Triages broken environments: a triage algorithm plus a playbook per failure mode (CrashLoopBackOff, OOMKilled, ImagePullBackOff, Pending, runtime errors, deploy failures, sync issues)
 - **`okteto-preview` skill** -- Preview environments for branches and pull requests: deploying with `okteto preview deploy`, capturing endpoints and posting the URL back to the PR or thread, mapping the flow to CI (`okteto/deploy-preview` GitHub Action, GitLab CI/CD), and teardown rules
-- **`okteto-manifest-optimizer` skill** -- Authors and reviews `okteto.yaml` for performance: pins images, scopes the build/sync context with `.dockerignore`/`.oktetoignore`/`.stignore`, persists dependencies in `dev.<svc>.volumes` and `test.<name>.caches`, sets `resources`, gets `forward`/`reverse` right, and runs a nine-item review checklist against Okteto's optimization best practices
+- **`okteto-manifest-optimizer` skill** -- Reviews and rewrites an existing `okteto.yaml` for performance: pins images, scopes the build/sync context with `.dockerignore`/`.oktetoignore`/`.stignore` (in the order each tool reads them), persists dependencies in `dev.<svc>.volumes` and `test.<name>.caches`, sets `resources`, gets `forward`/`reverse` right, runs a ten-item review checklist against Okteto's optimization best practices, then validates and rebuilds
 - **`/dev-setup` command** (Claude Code only) -- One-command environment setup: checks prerequisites, deploys services, shows endpoints, guides the developer into a dev container
 - **`/debug-env` command** (Claude Code only) -- Read-only health sweep: triages every unhealthy service (or one, with `/debug-env <service>`) and emits a structured root cause + fix per service
 - **Guardrail hooks** (Claude Code only) -- Deterministically block `okteto up` (it would hang the agent), require confirmation for `okteto destroy`/`okteto preview destroy`/`okteto namespace delete`, and announce Okteto projects at session start
@@ -127,13 +127,13 @@ The `okteto-preview` skill activates when someone wants a live, shareable enviro
 
 ### `okteto-manifest-optimizer` skill (automatic)
 
-The `okteto-manifest-optimizer` skill activates when someone wants to create, review, or speed up an `okteto.yaml` — "make my dev environment start faster", "review this manifest for performance", "set up an efficient okteto.yaml". It:
+The `okteto-manifest-optimizer` skill activates when a repo already has an `okteto.yaml` and someone wants it faster or reviewed — "make my dev environment start faster", "review this manifest for performance", "why is the initial sync so slow". It:
 
 - Encodes Okteto's [manifest performance best practices](https://www.okteto.com/docs/tutorials/optimize-your-development-environment/): pinned images, layer-ordered Dockerfiles with BuildKit cache mounts, `.dockerignore`/`.oktetoignore`/`.stignore` scoping, precopied dev images, and Volume Snapshots over slow seed scripts
 - Wires dev images with `${OKTETO_BUILD_<NAME>_IMAGE}`, persists dependencies in `dev.<svc>.volumes` and `test.<name>.caches`, sets `resources.requests`/`limits`, and gets `forward` (`local:remote`) vs `reverse` (`remote:local`) direction right
-- Runs a nine-item review checklist before returning the manifest and recommends `okteto validate`
+- Runs a ten-item review checklist, then `okteto validate`, then rebuilds and redeploys the way the `okteto` skill requires — a changed manifest is a build input and does not sync
 
-It authors and reviews manifests only — deploying and iterating stay with the `okteto` skill, and first-time service discovery on a repo with no manifest stays with `okteto-onboarding` (optimize its draft here afterward).
+Day-to-day development stays with the `okteto` skill, and first-time service discovery on a repo with no manifest stays with `okteto-onboarding` (optimize its draft here once it deploys).
 
 ### Cleanup and teardown
 
@@ -196,7 +196,7 @@ The three layers, cheapest first:
 |---|---|---|
 | `hooks` | `guard-okteto.sh` denies `okteto up`, escalates `okteto destroy`/`namespace delete` to *ask*, honors `OKTETO_ALLOW_AGENT_DESTROY=1`, fails open on bad input; `session-start.sh` announces the manifest | bash, jq |
 | `wiring` | The same guarantees hold *inside a real headless session*: a mock Messages API (`tests/mock-model/server.py`) force-feeds scripted tool calls, so the PreToolUse deny, the headless ask→block behavior, and the shim round-trip are verified deterministically | + claude, python3 |
-| `agent` | A live model given realistic prompts follows the skills: never executes `okteto up`, refuses to onboard over an existing `okteto.yaml`, isolates git worktrees with `okteto namespace create` + `-n` flags, never destroys without authorization, and generates an `okteto.yaml` per repo archetype that is validated both by a deterministic rubric and by an LLM judge (no `:latest`, `${OKTETO_BUILD_*_IMAGE}` wiring, scoped `.dockerignore`/`.stignore`, persisted deps, `resources`, correct `forward`/`reverse`, `test.caches`) | + claude auth |
+| `agent` | A live model given realistic prompts follows the skills: never executes `okteto up`, refuses to onboard over an existing `okteto.yaml`, isolates git worktrees with `okteto namespace create` + `-n` flags, never destroys without authorization, and, from a realistic "my environment is slow" complaint, loads `okteto-manifest-optimizer` and rewrites an `okteto.yaml` per repo archetype that is then gated by the real `okteto validate`, a deterministic rubric, and an LLM judge (no `:latest`, `${OKTETO_BUILD_*_IMAGE}` wiring, `.dockerignore`/`.stignore` scoped in the right order, persisted deps, `resources`, correct `forward`/`reverse`, `test.caches`) | + claude auth |
 
 For the agent layer, set `ANTHROPIC_API_KEY` or be logged in (`claude login`);
 the harness probes auth first and skips with a notice if neither works.

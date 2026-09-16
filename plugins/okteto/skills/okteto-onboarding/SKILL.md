@@ -303,6 +303,8 @@ dev:
       - .:/usr/src/app          # full-repo sync; exclude .venv, __pycache__ if they grow
 ```
 
+**Performance comes after the first successful deploy.** The draft above is deliberately plain. Once it validates and deploys, the `okteto-manifest-optimizer` skill tightens it — scoped `.stignore`/`.dockerignore`, dependency directories in `volumes`, `resources`, `test.caches`. Get a working manifest first; do not fold those in here.
+
 ### 4.2 Refine (Phase 4)
 
 Show the file to the user. In collaborative mode, ask:

@@ -73,7 +73,7 @@ Common cache targets: Node.js `node_modules` / npm / yarn caches; Java `/root/.m
 
 ### Context & sync management (highest impact)
 
-**7. `.dockerignore` — limit the build context.** Exclude everything, then include only build inputs. For multi-Dockerfile setups you can use image-specific files (e.g. `dev-dockerfile.dockerignore`).
+**7. `.dockerignore` — limit the build context.** Exclude everything, then include only build inputs. Docker applies the *last* matching rule, so `*` goes first and the `!` includes follow. For multi-Dockerfile setups you can use image-specific files (e.g. `dev-dockerfile.dockerignore`).
 
 ```gitignore
 # .dockerignore
@@ -88,7 +88,7 @@ Common cache targets: Node.js `node_modules` / npm / yarn caches; Java `/root/.m
 !src/**
 ```
 
-**8. `.oktetoignore` — control deployment/test context.** Uses `.gitignore` syntax, with `[deploy]` and `[test]` sections.
+**8. `.oktetoignore` — control deployment/test context.** Uses `.dockerignore` syntax. Patterns outside a section apply to every remote command; `[deploy]`, `[destroy]`, `[test]`, and `[test.<name>]` sections scope patterns to one command.
 
 ```gitignore
 # .oktetoignore
@@ -105,16 +105,25 @@ Common cache targets: Node.js `node_modules` / npm / yarn caches; Java `/root/.m
 !tests/**
 ```
 
-**9. `.stignore` — control file synchronization.** Sync only the files needed for active development; never sync generated artifacts, dependency directories, or VCS metadata.
+**9. `.stignore` — control file synchronization.** Sync only the files needed for active development; never sync generated artifacts, dependency directories, or VCS metadata. `.stignore` is a Syncthing ignore file: the **first** matching pattern decides, so `!` includes must come *before* the catch-all `*` — the reverse of `.dockerignore`. With `*` first, nothing syncs.
 
 ```gitignore
 # .stignore
-# exclude everything by default
-*
-
-# only sync active source
+# keep the active source (includes go FIRST -- first match wins)
 !src/**
 !public/**
+
+# ignore everything else
+*
+```
+
+When you'd rather list exclusions than includes, name the directories instead of using `*`:
+
+```gitignore
+# .stignore
+node_modules
+dist
+.git
 ```
 
 **10. Precopy sync content into the dev image.** With a multi-stage Dockerfile, build a `-dev` image whose stage already contains the source. This warms build caches and speeds the initial sync.
@@ -322,4 +331,4 @@ test:
       - npm test
 ```
 
-Ship it with a `.dockerignore` (practice 7) and a `.stignore` (practice 9); add a `.oktetoignore` (practice 8) if the deploy or test context is large. Recommend `okteto validate` before deploying.
+Ship it with a `.dockerignore` (practice 7) and a `.stignore` (practice 9); add a `.oktetoignore` (practice 8) if the deploy or test context is large. Then run `okteto validate`, and rebuild and redeploy (`okteto build`, `okteto deploy --wait`): a changed manifest, Dockerfile, or `.dockerignore` is a build input and does not sync.
