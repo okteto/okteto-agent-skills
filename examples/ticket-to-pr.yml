@@ -50,9 +50,9 @@ jobs:
       - name: Check out the okteto plugin
         uses: actions/checkout@v4
         with:
-          repository: okteto/okteto-claude-plugins
+          repository: okteto/okteto-agent-skills
           ref: main # pin to a tag or SHA for reproducible runs
-          path: .okteto-claude-plugins
+          path: .okteto-agent-skills
 
       - name: Install the Okteto CLI
         run: curl https://get.okteto.com -sSfL | sh
@@ -138,7 +138,7 @@ jobs:
                `okteto namespace delete ${{ env.NAMESPACE }}` — this pipeline
                pre-authorizes teardown via OKTETO_ALLOW_AGENT_DESTROY.
           claude_args: |
-            --plugin-dir ${{ github.workspace }}/.okteto-claude-plugins/plugins/okteto
+            --plugin-dir ${{ github.workspace }}/.okteto-agent-skills/plugins/okteto
             --allowedTools "Bash(okteto:*),Bash(git:*),Bash(gh:*),Bash(curl:*),Bash(jq:*),Read,Edit,Write,Glob,Grep,TodoWrite"
             --max-turns 50
 

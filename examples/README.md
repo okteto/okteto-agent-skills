@@ -41,14 +41,14 @@ CI can't run the interactive `/plugin install` flow, so the workflow checks this
 ```yaml
 - uses: actions/checkout@v4
   with:
-    repository: okteto/okteto-claude-plugins
+    repository: okteto/okteto-agent-skills
     ref: main # pin to a tag or SHA for reproducible runs
-    path: .okteto-claude-plugins
+    path: .okteto-agent-skills
 ```
 
 ```yaml
 claude_args: |
-  --plugin-dir ${{ github.workspace }}/.okteto-claude-plugins/plugins/okteto
+  --plugin-dir ${{ github.workspace }}/.okteto-agent-skills/plugins/okteto
 ```
 
 That gives the headless run the same skills (and guard hooks) a developer gets from `/plugin install okteto`. Pin `ref` to a release tag or commit SHA so plugin updates can't change your pipeline's behavior underneath you.

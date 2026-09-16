@@ -1,8 +1,5 @@
 # Okteto Plugins for AI Agents
 
-> [!WARNING]
-> **Experimental (alpha).** This is a best-effort experiment maintained by Okteto Product, not a supported product feature — it has not been through Okteto's standard production release process and is not covered by support SLAs. Report problems via [GitHub issues](https://github.com/okteto/okteto-claude-plugins/issues).
-
 Teaches AI agents how to work with [Okteto](https://www.okteto.com) development environments. Works with any project that has an `okteto.yaml`.
 
 Built on the open [Agent Skills](https://agentskills.io) format, so the same skills run in **Claude Code**, **Cursor**, **OpenAI Codex**, **GitHub Copilot**, **Antigravity CLI (formerly Gemini CLI)**, and [many more](https://agentskills.io/clients).
@@ -13,8 +10,8 @@ Pick the row for your agent. Every method teaches the agent the same Okteto work
 
 | Your agent | Install | You get |
 |---|---|---|
-| **Claude Code** | `/plugin marketplace add okteto/okteto-claude-plugins` → `/plugin install okteto` | All five skills **+ the `/dev-setup` and `/debug-env` commands** |
-| **Cursor, Codex, Copilot, Antigravity CLI (formerly Gemini CLI), [& more](https://agentskills.io/clients)** | `npx skills add okteto/okteto-claude-plugins` | All five skills, installed into your agent |
+| **Claude Code** | `/plugin marketplace add okteto/okteto-agent-skills` → `/plugin install okteto` | All five skills **+ the `/dev-setup` and `/debug-env` commands** |
+| **Cursor, Codex, Copilot, Antigravity CLI (formerly Gemini CLI), [& more](https://agentskills.io/clients)** | `npx skills add okteto/okteto-agent-skills` | All five skills, installed into your agent |
 | **Anything that reads `AGENTS.md`** | `cp agents/AGENTS.md <your-repo>/AGENTS.md` | One always-on instruction file |
 | **GitHub Copilot (file-based)** | `cp copilot/copilot-instructions.md <your-repo>/.github/copilot-instructions.md` | One always-on instruction file |
 
@@ -25,11 +22,11 @@ Requires the [Okteto CLI](https://www.okteto.com/docs/get-started/install-okteto
 Run these two commands inside Claude Code:
 
 ```
-/plugin marketplace add okteto/okteto-claude-plugins
+/plugin marketplace add okteto/okteto-agent-skills
 /plugin install okteto
 ```
 
-- `/plugin marketplace add okteto/okteto-claude-plugins` — tells Claude Code to trust this GitHub repo as a source of plugins. One-time registration.
+- `/plugin marketplace add okteto/okteto-agent-skills` — tells Claude Code to trust this GitHub repo as a source of plugins. One-time registration.
 - `/plugin install okteto` — installs the `okteto` plugin, wiring up its skills **and** the `/dev-setup` and `/debug-env` slash commands.
 
 After install, open any project with an `okteto.yaml` and ask Claude for help. The skills activate automatically; `/dev-setup` is available whenever you want a guided environment bring-up, and `/debug-env` runs a read-only health sweep of the environment. This is the only method that includes the slash commands and the guardrail hooks below.
@@ -49,14 +46,14 @@ The hooks fail open: if their input can't be parsed they allow the command, so t
 The [`skills`](https://github.com/vercel-labs/skills) CLI installs the skills into whichever agent you run it from — no Okteto-specific config required:
 
 ```
-npx skills add okteto/okteto-claude-plugins
+npx skills add okteto/okteto-agent-skills
 ```
 
 It auto-detects your agent (Cursor, Codex, Copilot, Antigravity CLI (formerly Gemini CLI), and [others](https://agentskills.io/clients)) and prompts you to pick skills. Useful flags:
 
 - `--skill '*' -y` — install all skills into the detected agent without prompting
 - `--copy` — copy the skill files in instead of symlinking them
-- `npx skills use okteto/okteto-claude-plugins@okteto` — print a skill as a one-off prompt without installing it
+- `npx skills use okteto/okteto-agent-skills@okteto` — print a skill as a one-off prompt without installing it
 
 Avoid `--all` — it installs into *every* known agent's directory, not just yours.
 
@@ -177,7 +174,7 @@ A complete, copy-pasteable GitHub Actions implementation of this flow — issue 
 For interactive poking, load the plugin into a session:
 
 ```
-claude --plugin-dir /path/to/okteto-claude-plugins/plugins/okteto
+claude --plugin-dir /path/to/okteto-agent-skills/plugins/okteto
 ```
 
 For repeatable checks there is a scripted eval harness. It runs headless
@@ -224,3 +221,7 @@ otherwise.
 - [Okteto CLI](https://www.okteto.com/docs/get-started/install-okteto-cli/) installed and configured
 - An `okteto.yaml` in your project root (use the `okteto-onboarding` skill if you don't have one yet)
 - A skills-compatible agent — see the [Install](#install) table
+
+---
+
+_Open-source (Apache-2.0), separate from the Okteto product, not covered by support SLAs._

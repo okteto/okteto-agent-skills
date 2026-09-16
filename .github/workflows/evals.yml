@@ -17,9 +17,9 @@ jobs:
   evals:
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    # The `secrets` context is not allowed in step `if:` conditionals (it fails
-    # the whole workflow at startup). Map the secret to a job-level env var once
-    # and gate on the `env` context instead, which `if:` does allow.
+    # The `secrets` context is not available in `if:` conditions — referencing it
+    # there fails the whole workflow at startup. Surface the key as an env var and
+    # branch on that instead.
     env:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
     steps:

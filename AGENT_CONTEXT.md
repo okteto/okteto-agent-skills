@@ -96,11 +96,11 @@ Every command accepts `-n <ns>` to target a namespace without changing the activ
 
 ## Plugin Distribution
 
-The plugin is published at: https://github.com/okteto/okteto-claude-plugins
+The plugin is published at: https://github.com/okteto/okteto-agent-skills
 
 Users install with:
 ```
-/plugin marketplace add okteto/okteto-claude-plugins
+/plugin marketplace add okteto/okteto-agent-skills
 /plugin install okteto
 ```
 
