@@ -17,6 +17,18 @@ if [ -n "${OKTETO_SHIM_LOG:-}" ]; then
   echo "okteto $*" >> "$OKTETO_SHIM_LOG"
 fi
 
+# Usage lookups are harmless (the guard hook allows them on purpose): answer
+# with canned help for any subcommand and never treat `okteto up --help` as an
+# execution of the interactive command.
+for arg in "$@"; do
+  case "$arg" in
+    --help|-h)
+      printf 'Usage:\n  okteto %s [flags]\n\nFlags:\n  -h, --help   help for %s\n' "${1:-}" "${1:-okteto}"
+      exit 0
+      ;;
+  esac
+done
+
 case "$1" in
   version)
     echo "okteto version 3.14.2"

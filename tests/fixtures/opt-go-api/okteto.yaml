@@ -1,0 +1,8 @@
+# Intentionally un-optimized starting manifest for the manifest-optimizer eval.
+# :latest, hardcoded dev image, full-tree sync, no build/volumes/resources/test/ignores.
+dev:
+  api:
+    image: golang:latest
+    command: bash
+    sync:
+      - .:/app

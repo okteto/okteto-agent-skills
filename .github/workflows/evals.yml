@@ -34,6 +34,10 @@ jobs:
       - name: Wiring tests (mock model, no API key)
         run: tests/run-evals.sh --layer wiring
 
+      - name: Install Okteto CLI (schema-validates the manifests the optimizer evals generate)
+        if: ${{ env.ANTHROPIC_API_KEY != '' }}
+        run: curl https://get.okteto.com -sSfL | sh
+
       - name: Live agent evals
         if: ${{ env.ANTHROPIC_API_KEY != '' }}
         run: tests/run-evals.sh --layer agent

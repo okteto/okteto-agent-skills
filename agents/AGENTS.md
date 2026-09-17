@@ -119,6 +119,18 @@ Never deploy a modified `okteto.yaml` without validating first — a bad manifes
 | Environment looks stale | `okteto deploy --wait` to redeploy |
 | Persistent unexplained failure | `okteto doctor` — generates a diagnostic bundle to share with Okteto support |
 
+## Writing an efficient okteto.yaml
+
+When you create or edit `okteto.yaml`, follow Okteto's manifest performance best practices. Slow environments almost always come from unpinned images, a bloated build or sync context, or dependencies re-fetched on every start:
+
+- **Pin every image** — a version tag or `@sha256`, never `:latest`. When a service has a `build:` entry, wire its dev image to it with `${OKTETO_BUILD_<NAME>_IMAGE}` (uppercase the build name, `-` becomes `_`).
+- **Scope the context — the two ignore files read in opposite order.** `.dockerignore`: `*` first, then `!`-include only build inputs (Docker applies the last matching rule). `.stignore`: `!`-include the active source first, then `*` (Syncthing applies the first matching rule; `*` first syncs nothing) — never sync artifacts, dependency directories, or `.git`. Add a `.oktetoignore` (`.dockerignore` syntax, `[deploy]`/`[test]` sections) when the deploy or test context is large.
+- **Persist dependencies and caches** in `dev.<svc>.volumes` and `test.<name>.caches`: Node `node_modules`, Go `/go/pkg/mod` and `/root/.cache/go-build`, Maven `/root/.m2`, Python pip cache and virtualenv.
+- **Set `resources.requests` and `resources.limits`** on every dev container — both are unset by default.
+- **Get port direction right:** `forward` is `localPort:remotePort`; `reverse` is `remotePort:localPort`.
+- **Order Dockerfiles by change frequency** (base and system packages, then dependency install, then source) and never `COPY . .`; use BuildKit cache mounts for dependency and build caches.
+- **Validate and rebuild without being asked.** `okteto.yaml`, the Dockerfile, and `.dockerignore` are build inputs — nothing syncs them. Run `okteto validate` as soon as the manifest is written, then `okteto build <service>` and `okteto deploy --wait`, and report the outcome.
+
 ## Autonomous mode
 
 When operating without a developer in the loop (e.g. triggered by a ticket or PR), own the full lifecycle. Do not use `okteto up` — it requires a human. Use `okteto deploy` for environments and `okteto test` for validation.

@@ -1,0 +1,9 @@
+# Intentionally un-optimized starting manifest for the manifest-optimizer eval.
+# It uses :latest, a hardcoded dev image, full-tree sync, and has no build,
+# volumes, resources, test caches, or ignore files. The skill should fix all of that.
+dev:
+  web:
+    image: node:latest
+    command: npm run dev
+    sync:
+      - .:/usr/src/app
